@@ -9,7 +9,11 @@ import warnings
 import os
 import json
 from openai import OpenAI
+from dotenv import load_dotenv
+
 warnings.filterwarnings('ignore')
+
+load_dotenv()
 
 # Configure page
 st.set_page_config(
@@ -79,14 +83,14 @@ class RateCalculator:
         self._initialize_openai()
 
     def _initialize_openai(self):
-        """Initialize OpenAI client with API key from environment or Streamlit secrets."""
+        """Initialize OpenAI client with API key from .env file or Streamlit secrets."""
         try:
             # Try to get API key from Streamlit secrets first
             if hasattr(st, 'secrets') and 'openai' in st.secrets and 'api_key' in st.secrets.openai:
                 api_key = st.secrets.openai.api_key
             else:
-                # Fallback to environment variable
-                api_key = os.getenv('OPENAI_API_KEY')
+                # Fallback to environment variable from .env file
+                api_key = os.getenv('OPEN_AI_KEY')
             
             if api_key:
                 self.openai_client = OpenAI(api_key=api_key)
