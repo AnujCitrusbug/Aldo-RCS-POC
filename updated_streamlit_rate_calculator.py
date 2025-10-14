@@ -6,6 +6,9 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime
 import warnings
+import os
+import json
+from openai import OpenAI
 warnings.filterwarnings('ignore')
 
 # Configure page
@@ -65,6 +68,32 @@ class RateCalculator:
         self.FALLBACK_SURCHARGE_MULTIPLIER = 1.25
         self.TRANSCAR_WEIGHT = 0.7
         self.COMPETITOR_WEIGHT = 0.3
+        
+        # Enhanced fallback configuration
+        self.NEARBY_METRO_THRESHOLD = 200  # miles
+        self.ADMIN_BASE_PER_MILE_RATE = 1.25
+        self.ADMIN_BASE_RATE_SURCHARGE = 0.25  # 25% surcharge
+        
+        # Initialize OpenAI client
+        self.openai_client = None
+        self._initialize_openai()
+
+    def _initialize_openai(self):
+        """Initialize OpenAI client with API key from environment or Streamlit secrets."""
+        try:
+            # Try to get API key from Streamlit secrets first
+            if hasattr(st, 'secrets') and 'openai' in st.secrets and 'api_key' in st.secrets.openai:
+                api_key = st.secrets.openai.api_key
+            else:
+                # Fallback to environment variable
+                api_key = os.getenv('OPENAI_API_KEY')
+            
+            if api_key:
+                self.openai_client = OpenAI(api_key=api_key)
+            else:
+                st.warning("⚠️ OpenAI API key not found. Enhanced fallback features will be limited.")
+        except Exception as e:
+            st.warning(f"⚠️ Failed to initialize OpenAI client: {str(e)}")
 
     def _prepare_data(self):
         """Convert string columns to appropriate numeric types for calculations."""
@@ -248,6 +277,164 @@ class RateCalculator:
 
         return weighted_rate, len(transcar_rates), len(competitor_rates)
 
+    def get_nearby_metros(self, metro_name, threshold_miles=200):
+        """Get metros within threshold distance of the given metro."""
+        if metro_name is None:
+            return []
+        
+        try:
+            # Find the metro coordinates
+            metro_row = self.metro_definitions[self.metro_definitions['Metro_Area'] == metro_name]
+            if metro_row.empty:
+                return []
+            
+            metro_lat = float(metro_row.iloc[0]['Latitude'])
+            metro_lon = float(metro_row.iloc[0]['Longitude'])
+            metro_location = (metro_lat, metro_lon)
+            
+            nearby_metros = []
+            for idx, other_metro in self.metro_definitions.iterrows():
+                if other_metro['Metro_Area'] == metro_name:
+                    continue
+                
+                try:
+                    other_lat = float(other_metro['Latitude'])
+                    other_lon = float(other_metro['Longitude'])
+                    other_location = (other_lat, other_lon)
+                    
+                    distance = geodesic(metro_location, other_location).miles
+                    if distance <= threshold_miles:
+                        nearby_metros.append({
+                            'metro': other_metro['Metro_Area'],
+                            'distance': distance
+                        })
+                except (ValueError, TypeError):
+                    continue
+            
+            return sorted(nearby_metros, key=lambda x: x['distance'])
+        except (ValueError, TypeError, KeyError):
+            return []
+
+    def find_similar_routes_with_openai(self, origin_metro, dest_metro):
+        """Use OpenAI to find similar routes and determine if they're within 200 miles."""
+        if not self.openai_client:
+            return None, "OpenAI not available"
+        
+        try:
+            # Get all available metros for context
+            all_metros = self.metro_definitions['Metro_Area'].tolist()
+            
+            prompt = f"""
+            You are a transportation logistics expert. I need to find similar routes for transport pricing.
+
+            Available metro areas: {', '.join(all_metros)}
+
+            Target route: {origin_metro} → {dest_metro}
+
+            Please analyze and suggest similar routes that would be within 200 miles of either the origin or destination metro.
+            Consider:
+            1. Nearby Origin Metro → Destination Metro (within 200 miles of origin)
+            2. Origin Metro → Nearby Destination Metro (within 200 miles of destination)
+            3. Geographic proximity and transportation patterns
+
+            Return your response as a JSON object with this structure:
+            {{
+                "similar_routes": [
+                    {{
+                        "origin_metro": "metro_name",
+                        "dest_metro": "metro_name", 
+                        "similarity_type": "nearby_origin" or "nearby_destination",
+                        "confidence": 0.0-1.0,
+                        "reasoning": "brief explanation"
+                    }}
+                ],
+                "recommended_route": {{
+                    "origin_metro": "metro_name",
+                    "dest_metro": "metro_name",
+                    "confidence": 0.0-1.0
+                }}
+            }}
+
+            Only suggest routes that are actually within 200 miles of the original route endpoints.
+            """
+
+            response = self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1000
+            )
+            result = json.loads(response.choices[0].message.content)
+            return result, "OpenAI Analysis"
+            
+        except Exception as e:
+            return None, f"OpenAI Error: {str(e)}"
+
+    def lookup_enhanced_fallback_data(self, origin_metro, dest_metro):
+        """Enhanced fallback: Search for similar routes using OpenAI and nearby metros."""
+        fallback_results = []
+        
+        # Method 1: Use OpenAI to find similar routes
+        if self.openai_client:
+            ai_result, ai_status = self.find_similar_routes_with_openai(origin_metro, dest_metro)
+            if ai_result and 'similar_routes' in ai_result:
+                for route in ai_result['similar_routes']:
+                    similar_origin = route['origin_metro']
+                    similar_dest = route['dest_metro']
+                    confidence = route.get('confidence', 0.5)
+                    
+                    # Look up historical data for similar route
+                    historical_rate, transcar_count, competitor_count = self.lookup_historical_data(similar_origin, similar_dest)
+                    if historical_rate is not None:
+                        fallback_results.append({
+                            'rate': historical_rate,
+                            'transcar_count': transcar_count,
+                            'competitor_count': competitor_count,
+                            'method': 'AI Similar Route',
+                            'confidence': confidence,
+                            'route': f"{similar_origin} → {similar_dest}",
+                            'reasoning': route.get('reasoning', 'AI suggested similar route')
+                        })
+        
+        # Method 2: Nearby metro search (within 200 miles)
+        nearby_origin_metros = self.get_nearby_metros(origin_metro, self.NEARBY_METRO_THRESHOLD)
+        nearby_dest_metros = self.get_nearby_metros(dest_metro, self.NEARBY_METRO_THRESHOLD)
+        
+        # Search for routes: Nearby Origin → Destination
+        for nearby_metro in nearby_origin_metros:
+            historical_rate, transcar_count, competitor_count = self.lookup_historical_data(nearby_metro['metro'], dest_metro)
+            if historical_rate is not None:
+                fallback_results.append({
+                    'rate': historical_rate,
+                    'transcar_count': transcar_count,
+                    'competitor_count': competitor_count,
+                    'method': 'Nearby Origin Metro',
+                    'confidence': 0.8,
+                    'route': f"{nearby_metro['metro']} → {dest_metro}",
+                    'reasoning': f"Origin metro within {nearby_metro['distance']:.1f} miles"
+                })
+        
+        # Search for routes: Origin → Nearby Destination
+        for nearby_metro in nearby_dest_metros:
+            historical_rate, transcar_count, competitor_count = self.lookup_historical_data(origin_metro, nearby_metro['metro'])
+            if historical_rate is not None:
+                fallback_results.append({
+                    'rate': historical_rate,
+                    'transcar_count': transcar_count,
+                    'competitor_count': competitor_count,
+                    'method': 'Nearby Destination Metro',
+                    'confidence': 0.8,
+                    'route': f"{origin_metro} → {nearby_metro['metro']}",
+                    'reasoning': f"Destination metro within {nearby_metro['distance']:.1f} miles"
+                })
+
+        # Return the best match (highest confidence)
+        if fallback_results:
+            best_match = max(fallback_results, key=lambda x: x['confidence'])
+            return best_match['rate'], best_match['transcar_count'], best_match['competitor_count'], best_match
+        
+        return None, 0, 0, None
+
     def calculate_surcharge(self, distance_to_metro):
         """Calculate surcharge based on distance from nearest metro area."""
         if distance_to_metro <= 25:
@@ -311,18 +498,35 @@ class RateCalculator:
         result['transcar_data_count'] = transcar_count
         result['competitor_data_count'] = competitor_count
 
-        # Step 5: Determine base rate
+        # Step 5: Enhanced fallback mechanism
         if historical_rate is not None:
             result['base_rate'] = historical_rate * distance
             result['per_mile_rate'] = historical_rate
             result['calculation_method'] = 'Historical Data'
         else:
-            fallback_rate = self.FALLBACK_RATE_PER_MILE
-            if not origin_within and not dest_within:
-                fallback_rate *= self.FALLBACK_SURCHARGE_MULTIPLIER
-            result['base_rate'] = fallback_rate * distance
-            result['per_mile_rate'] = fallback_rate
-            result['calculation_method'] = 'Fallback Rate'
+            # Enhanced fallback: Search for similar routes
+            enhanced_rate, enhanced_transcar_count, enhanced_competitor_count, fallback_info = self.lookup_enhanced_fallback_data(origin_metro, dest_metro)
+            
+            if enhanced_rate is not None:
+                result['base_rate'] = enhanced_rate * distance
+                result['per_mile_rate'] = enhanced_rate
+                result['calculation_method'] = f'Enhanced Fallback ({fallback_info["method"]})'
+                result['fallback_info'] = fallback_info
+                result['enhanced_transcar_count'] = enhanced_transcar_count
+                result['enhanced_competitor_count'] = enhanced_competitor_count
+            else:
+                # Ultimate fallback: Admin Base Rate
+                if not origin_within and not dest_within:
+                    # Both non-metro: Admin Base Rate + 25% surcharge
+                    admin_rate = self.ADMIN_BASE_PER_MILE_RATE * (1 + self.ADMIN_BASE_RATE_SURCHARGE)
+                    result['calculation_method'] = 'Admin Base Rate (Non-Metro +25%)'
+                else:
+                    # At least one metro: Standard Admin Base Rate
+                    admin_rate = self.ADMIN_BASE_PER_MILE_RATE
+                    result['calculation_method'] = 'Admin Base Rate'
+                
+                result['base_rate'] = admin_rate * distance
+                result['per_mile_rate'] = admin_rate
 
         # Step 6: Calculate surcharges
         origin_surcharge = 0 if origin_within else self.calculate_surcharge(origin_distance)
@@ -671,21 +875,27 @@ def main():
                 # Historical data analysis
                 transcar_count = result.get('transcar_data_count', 0)
                 competitor_count = result.get('competitor_data_count', 0)
+                enhanced_transcar_count = result.get('enhanced_transcar_count', 0)
+                enhanced_competitor_count = result.get('enhanced_competitor_count', 0)
+                fallback_info = result.get('fallback_info')
 
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
-                    st.metric("📊 Transcar Records", transcar_count, "70% weight")
+                    st.metric("📊 Transcar Records", transcar_count + enhanced_transcar_count, "70% weight")
 
                 with col2:
-                    st.metric("🏢 Competitor Records", competitor_count, "30% weight")
+                    st.metric("🏢 Competitor Records", competitor_count + enhanced_competitor_count, "30% weight")
 
                 with col3:
-                    total_records = transcar_count + competitor_count
+                    total_records = transcar_count + competitor_count + enhanced_transcar_count + enhanced_competitor_count
                     st.metric("📈 Total Records", total_records, "Available data")
 
                 if total_records > 0:
-                    st.success(f"✅ Historical data available! Using {total_records} records for calculation.")
+                    if result.get('calculation_method') == 'Historical Data':
+                        st.success(f"✅ Direct historical data available! Using {transcar_count + competitor_count} records for calculation.")
+                    else:
+                        st.success(f"✅ Enhanced fallback data found! Using similar route data.")
 
                     if result.get('historical_per_mile_rate'):
                         st.info(f"📊 Calculated historical rate: **${result['historical_per_mile_rate']:.3f} per mile**")
@@ -697,8 +907,23 @@ def main():
                             st.write(f"Rate based on {transcar_count} Transcar records (preferred source)")
                         else:
                             st.write(f"Rate based on {competitor_count} Competitor records")
+                    
+                    # Enhanced fallback information
+                    if fallback_info:
+                        st.subheader("Enhanced OpenAI Results")
+                        st.info(f"""
+                        **Method**: {fallback_info['method']}  
+                        **Similar Route**: {fallback_info['route']}  
+                        **Confidence**: {fallback_info['confidence']:.1%}  
+                        **Reasoning**: {fallback_info['reasoning']}
+                        """)
+                        
+                        if fallback_info['method'] == 'AI Similar Route':
+                            st.success("🎯 OpenAI successfully identified a similar route!")
+                        else:
+                            st.info("📍 Found nearby metro within 200 miles")
                 else:
-                    st.warning(f"⚠️ No historical data available for this metro pair. Using fallback rate of ${calculator.FALLBACK_RATE_PER_MILE}/mile.")
+                    st.warning(f"⚠️ No historical data available for this metro pair. Using Admin Base Rate of ${calculator.ADMIN_BASE_PER_MILE_RATE}/mile.")
 
             with tab4:
                 # Detailed calculation information
@@ -709,10 +934,11 @@ def main():
                     ("1. Distance Calculation", f"{result['distance']:.2f} miles from {result['distance_source']}"),
                     ("2. Short Distance Check", f"{'Applied $200 flat rate' if result['distance'] < 100 else 'Standard calculation applied'}"),
                     ("3. Metro Assignment", f"Origin: {result.get('origin_metro', 'Unknown')}, Destination: {result.get('dest_metro', 'Unknown')}"),
-                    ("4. Historical Data Lookup", f"{transcar_count + competitor_count} records found"),
-                    ("5. Base Rate Calculation", f"${result['base_rate']:.2f} using {result['calculation_method']}"),
-                    ("6. Surcharge Application", f"${result['total_surcharge']:.2f} total surcharges"),
-                    ("7. Final Rate", f"${result['final_rate']:.2f} (${result['per_mile_rate']:.3f}/mile)")
+                    ("4. Historical Data Lookup", f"{transcar_count + competitor_count} direct records found"),
+                    ("5. Enhanced Fallback", f"{'Used' if result.get('fallback_info') else 'Not needed'} - {result['calculation_method']}"),
+                    ("6. Base Rate Calculation", f"${result['base_rate']:.2f} using {result['calculation_method']}"),
+                    ("7. Surcharge Application", f"${result['total_surcharge']:.2f} total surcharges"),
+                    ("8. Final Rate", f"${result['final_rate']:.2f} (${result['per_mile_rate']:.3f}/mile)")
                 ]
 
                 for step, description in steps:
@@ -724,7 +950,9 @@ def main():
                     'Parameter': [
                         'Short Distance Threshold',
                         'Short Distance Flat Rate',
-                        'Fallback Rate per Mile',
+                        'Admin Base Per-Mile Rate',
+                        'Admin Base Rate Surcharge',
+                        'Nearby Metro Threshold',
                         'Transcar Data Weight',
                         'Competitor Data Weight',
                         'Fallback Surcharge Multiplier'
@@ -732,13 +960,31 @@ def main():
                     'Value': [
                         f"{calculator.SHORT_DISTANCE_THRESHOLD} miles",
                         f"${calculator.SHORT_DISTANCE_FLAT_RATE}",
-                        f"${calculator.FALLBACK_RATE_PER_MILE}",
+                        f"${calculator.ADMIN_BASE_PER_MILE_RATE}",
+                        f"{calculator.ADMIN_BASE_RATE_SURCHARGE*100}%",
+                        f"{calculator.NEARBY_METRO_THRESHOLD} miles",
                         f"{calculator.TRANSCAR_WEIGHT*100}%",
                         f"{calculator.COMPETITOR_WEIGHT*100}%",
                         f"{calculator.FALLBACK_SURCHARGE_MULTIPLIER}x"
                     ]
                 }
                 st.dataframe(pd.DataFrame(config_data), use_container_width=True, hide_index=True)
+
+                # Enhanced fallback mechanism details
+                st.subheader("🤖 Enhanced Fallback Mechanism")
+                st.write("""
+                **Fallback Priority Order:**
+                1. **Historical Data**: Direct metro-to-metro match
+                2. **AI Similar Routes**: OpenAI analyzes similar routes within 200 miles
+                3. **Nearby Metro Search**: Find metros within 200 miles of origin/destination
+                4. **Admin Base Rate**: Ultimate fallback with configurable rates
+                
+                **Enhanced Features:**
+                - **OpenAI Integration**: Intelligent route similarity detection
+                - **200-Mile Radius**: Search for nearby metros within 200 miles
+                - **Smart Weighting**: Confidence-based route selection
+                - **Non-Metro Surcharge**: 25% surcharge for both non-metro locations
+                """)
 
                 # Distance calculation method details
                 st.subheader("📏 Distance Calculation Method")
@@ -760,6 +1006,8 @@ def main():
         - 📏 **Distance calculations** using Excel data (priority) or geodesic coordinates
         - 🏙️ **Metro area assignments** with configurable radius
         - 📊 **Historical data integration** (70% Transcar + 30% Competitor)
+        - 🤖 **AI-enhanced fallback** using OpenAI for intelligent route similarity detection
+        - 🎯 **200-mile radius search** for nearby metros and similar routes
         - 💰 **Smart surcharge system** for outside-metro locations
 
         ### 🚀 How to Use:
