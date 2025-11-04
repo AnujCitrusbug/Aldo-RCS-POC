@@ -399,6 +399,7 @@ class RateCalculator:
                             'route': f"{similar_origin} → {similar_dest}",
                             'reasoning': route.get('reasoning', 'AI suggested similar route')
                         })
+
         
         # Method 2: Nearby metro search (within 200 miles)
         nearby_origin_metros = self.get_nearby_metros(origin_metro, self.NEARBY_METRO_THRESHOLD)
@@ -561,10 +562,10 @@ def clean_column_names(header_row):
 def load_data():
     """Load and cache the POC data including sample routes with distances"""
     try:
-        df_all = pd.read_excel("POC-Data-2.xlsx", sheet_name='Sheet1', header=None)
+        df_all = pd.read_excel("POC-Data-3-new.xlsx", sheet_name='Sheet1', header=None)
 
         # Extract sample routes WITH DISTANCES - using safe column name handling
-        sample_routes = df_all.iloc[2:6, 0:7].copy()
+        sample_routes = df_all.iloc[2:9, 0:7].copy()
 
         # Clean column names to avoid reindexing error
         header_row = sample_routes.iloc[0].tolist()
@@ -575,28 +576,28 @@ def load_data():
         sample_routes = sample_routes.iloc[1:].dropna(how='all').reset_index(drop=True)
 
         # Extract metro definitions
-        metro_definitions = df_all.iloc[10:43, 0:7].copy()
+        metro_definitions = df_all.iloc[12:75, 0:7].copy()
         header_row = metro_definitions.iloc[0].tolist()
         clean_headers = clean_column_names(header_row)
         metro_definitions.columns = clean_headers
         metro_definitions = metro_definitions.iloc[1:].dropna(how='all').reset_index(drop=True)
 
-        # Extract zipcode assignment
-        zipcode_assignment = df_all.iloc[44:54, 0:5].copy()
+        # Extract zipcode assignment (header at row 78, data from row 79, ends before transcar at row 90)
+        zipcode_assignment = df_all.iloc[78:90, 0:5].copy()
         header_row = zipcode_assignment.iloc[0].tolist()
         clean_headers = clean_column_names(header_row[:5])  # Only take first 5 columns
         zipcode_assignment.columns = clean_headers
         zipcode_assignment = zipcode_assignment.iloc[1:].dropna(how='all').reset_index(drop=True)
 
-        # Extract transcar data
-        transcar_data = df_all.iloc[55:75, 0:11].copy()
+        # Extract transcar data (section title at row 90, header at row 91, data from row 92, ends before competitor at row 146)
+        transcar_data = df_all.iloc[91:146, 0:11].copy()
         header_row = transcar_data.iloc[0].tolist()
         clean_headers = clean_column_names(header_row)
         transcar_data.columns = clean_headers
         transcar_data = transcar_data.iloc[1:].dropna(how='all').reset_index(drop=True)
 
-        # Extract competitor data
-        competitor_data = df_all.iloc[76:, 0:11].copy()
+        # Extract competitor data (section title at row 146, header at row 147, data from row 148+)
+        competitor_data = df_all.iloc[147:, 0:11].copy()
         header_row = competitor_data.iloc[0].tolist()
         clean_headers = clean_column_names(header_row)
         competitor_data.columns = clean_headers
@@ -623,7 +624,7 @@ def load_data():
         return metro_definitions, zipcode_assignment, transcar_data, competitor_data, sample_routes
 
     except FileNotFoundError:
-        st.error("POC-Data-2.xlsx file not found. Please ensure it's in the same directory as this app.")
+        st.error("POC-Data-3-new.xlsx file not found. Please ensure it's in the same directory as this app.")
         return None, None, None, None, None
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
@@ -748,7 +749,7 @@ def main():
     )
 
     # Calculate button
-    calculate_button = st.sidebar.button("🚀 Calculate Rate", type="primary", use_container_width=True)
+    calculate_button = st.sidebar.button("🚀 Calculate Rate", type="primary", width='stretch')
 
     # Validation
     if origin_location == dest_location:
@@ -827,7 +828,7 @@ def main():
                     ['**Total Rate**', f"**${result['final_rate']:.2f}**", f"**Final transport rate**"]
                 ], columns=['Component', 'Amount', 'Details'])
 
-                st.dataframe(breakdown_df, use_container_width=True, hide_index=True)
+                st.dataframe(breakdown_df, width='stretch', hide_index=True)
 
                 # Distance source information
                 if result['distance_source'] == 'Excel Data':
@@ -843,7 +844,7 @@ def main():
                 if None not in origin_coords and None not in dest_coords:
                     fig = create_route_visualization(origin_coords, dest_coords, origin_location, dest_location)
                     if fig:
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width='stretch')
 
                     # Route summary
                     col1, col2 = st.columns(2)
@@ -972,7 +973,7 @@ def main():
                         f"{calculator.FALLBACK_SURCHARGE_MULTIPLIER}x"
                     ]
                 }
-                st.dataframe(pd.DataFrame(config_data), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(config_data), width='stretch', hide_index=True)
 
                 # Enhanced fallback mechanism details
                 st.subheader("🤖 Enhanced Fallback Mechanism")
@@ -1043,7 +1044,7 @@ def main():
 
             st.dataframe(
                 display_routes[columns_to_show].rename(columns=column_renames),
-                use_container_width=True,
+                width='stretch',
                 hide_index=True
             )
 
