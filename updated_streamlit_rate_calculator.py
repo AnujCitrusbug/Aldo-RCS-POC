@@ -235,36 +235,43 @@ class RateCalculator:
         return geodesic_distance, "Calculated"
 
     def lookup_historical_data(self, origin_metro, dest_metro):
-        """Search for historical pricing data between metro pairs."""
-        # Search Transcar data
+        """Search for historical pricing data for exact route (origin to destination only)."""
+        # Search Transcar data - exact route match only
         transcar_rates = []
-        for idx, row in self.transcar_data.iterrows():
-            try:
-                pickup_metro, _, _ = self.assign_metro(row['Pickup ZIP'])
-                delivery_metro, _, _ = self.assign_metro(row['Delivery ZIP'])
-
-                if ((pickup_metro == origin_metro and delivery_metro == dest_metro) or
-                    (pickup_metro == dest_metro and delivery_metro == origin_metro)):
-                    rate = float(row['Total Price per Mile'])
-                    if not pd.isna(rate) and rate > 0:
-                        transcar_rates.append(rate)
-            except (ValueError, TypeError, KeyError):
-                continue
-
-        # Search Competitor data
+        pickup_city, pickup_state = origin_metro.split(', ')
+        delivery_city, delivery_state = dest_metro.split(', ')
+        
+        filtered_transcar_rates =  self.transcar_data[
+            (self.transcar_data['Pickup City'] == pickup_city) &
+            (self.transcar_data['Pickup State'] == pickup_state) &
+            (self.transcar_data['Delivery City'] == delivery_city) &
+            (self.transcar_data['Delivery State'] == delivery_state)
+        ]
+        transcar_rates.extend([i["Total Price per Mile"] for i in filtered_transcar_rates[["Total Price per Mile"]].to_dict(orient="records")])
+        # Search Competitor data - exact route match only
         competitor_rates = []
-        for idx, row in self.competitor_data.iterrows():
-            try:
-                origin_metro_comp, _, _ = self.assign_metro(row['Origin Zipcode'])
-                dest_metro_comp, _, _ = self.assign_metro(row['Dest Zipcode'])
+        pickup_city, pickup_state = origin_metro.split(', ')
+        delivery_city, delivery_state = dest_metro.split(', ')
+        filtered_competitor_rates =  self.competitor_data[
+            (self.competitor_data['Origin City'] == pickup_city) &
+            (self.competitor_data['Origin State'] == pickup_state) &
+            (self.competitor_data['Destination City'] == delivery_city) &
+            (self.competitor_data['Dest State'] == delivery_state)
+        ]
+        competitor_rates.extend([i["competitor price per Mile"] for i in filtered_competitor_rates[["competitor price per Mile"]].to_dict(orient="records")])
 
-                if ((origin_metro_comp == origin_metro and dest_metro_comp == dest_metro) or
-                    (origin_metro_comp == dest_metro and dest_metro_comp == origin_metro)):
-                    rate = float(row['competitor price per Mile'])
-                    if not pd.isna(rate) and rate > 0:
-                        competitor_rates.append(rate)
-            except (ValueError, TypeError, KeyError):
-                continue
+        # OLD LOGIC
+        # for idx, row in self.competitor_data.iterrows():
+        #     try:
+        #         origin_metro_comp, _, _ = self.assign_metro(row['Origin Zipcode'])
+        #         dest_metro_comp, _, _ = self.assign_metro(row['Dest Zipcode'])
+
+        #         if (origin_metro_comp == origin_metro and dest_metro_comp == dest_metro):
+        #             rate = float(row['competitor price per Mile'])
+        #             if not pd.isna(rate) and rate > 0:
+        #                 competitor_rates.append(rate)
+        #     except (ValueError, TypeError, KeyError):
+        #         continue
 
         # Calculate weighted average
         transcar_avg = np.mean(transcar_rates) if transcar_rates else 0
@@ -562,10 +569,10 @@ def clean_column_names(header_row):
 def load_data():
     """Load and cache the POC data including sample routes with distances"""
     try:
-        df_all = pd.read_excel("POC-Data-3-new.xlsx", sheet_name='Sheet1', header=None)
+        df_all = pd.read_excel("POC-Data-4-new.xlsx", sheet_name='Sheet1', header=None)
 
         # Extract sample routes WITH DISTANCES - using safe column name handling
-        sample_routes = df_all.iloc[2:9, 0:7].copy()
+        sample_routes = df_all.iloc[2:12, 0:7].copy()
 
         # Clean column names to avoid reindexing error
         header_row = sample_routes.iloc[0].tolist()
@@ -576,28 +583,28 @@ def load_data():
         sample_routes = sample_routes.iloc[1:].dropna(how='all').reset_index(drop=True)
 
         # Extract metro definitions
-        metro_definitions = df_all.iloc[12:75, 0:7].copy()
+        metro_definitions = df_all.iloc[14:78, 0:7].copy()
         header_row = metro_definitions.iloc[0].tolist()
         clean_headers = clean_column_names(header_row)
         metro_definitions.columns = clean_headers
         metro_definitions = metro_definitions.iloc[1:].dropna(how='all').reset_index(drop=True)
 
         # Extract zipcode assignment (header at row 78, data from row 79, ends before transcar at row 90)
-        zipcode_assignment = df_all.iloc[78:90, 0:5].copy()
+        zipcode_assignment = df_all.iloc[80:95, 0:5].copy()
         header_row = zipcode_assignment.iloc[0].tolist()
         clean_headers = clean_column_names(header_row[:5])  # Only take first 5 columns
         zipcode_assignment.columns = clean_headers
         zipcode_assignment = zipcode_assignment.iloc[1:].dropna(how='all').reset_index(drop=True)
 
         # Extract transcar data (section title at row 90, header at row 91, data from row 92, ends before competitor at row 146)
-        transcar_data = df_all.iloc[91:146, 0:11].copy()
+        transcar_data = df_all.iloc[98:151, 0:11].copy()
         header_row = transcar_data.iloc[0].tolist()
         clean_headers = clean_column_names(header_row)
         transcar_data.columns = clean_headers
         transcar_data = transcar_data.iloc[1:].dropna(how='all').reset_index(drop=True)
 
         # Extract competitor data (section title at row 146, header at row 147, data from row 148+)
-        competitor_data = df_all.iloc[147:, 0:11].copy()
+        competitor_data = df_all.iloc[154:, 0:11].copy()
         header_row = competitor_data.iloc[0].tolist()
         clean_headers = clean_column_names(header_row)
         competitor_data.columns = clean_headers
@@ -624,7 +631,7 @@ def load_data():
         return metro_definitions, zipcode_assignment, transcar_data, competitor_data, sample_routes
 
     except FileNotFoundError:
-        st.error("POC-Data-3-new.xlsx file not found. Please ensure it's in the same directory as this app.")
+        st.error("POC-Data-4-new.xlsx file not found. Please ensure it's in the same directory as this app.")
         return None, None, None, None, None
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
