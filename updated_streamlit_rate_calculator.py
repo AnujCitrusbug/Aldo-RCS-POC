@@ -248,6 +248,7 @@ class RateCalculator:
             (self.transcar_data['Delivery State'] == delivery_state)
         ]
         transcar_rates.extend([i["Total Price per Mile"] for i in filtered_transcar_rates[["Total Price per Mile"]].to_dict(orient="records")])
+        
         # Search Competitor data - exact route match only
         competitor_rates = []
         pickup_city, pickup_state = origin_metro.split(', ')
@@ -286,7 +287,7 @@ class RateCalculator:
         else:
             weighted_rate = None
 
-        return weighted_rate, len(transcar_rates), len(competitor_rates)
+        return weighted_rate, len(transcar_rates), len(competitor_rates), filtered_transcar_rates, filtered_competitor_rates
 
     def get_nearby_metros(self, metro_name, threshold_miles=200):
         """Get metros within threshold distance of the given metro."""
@@ -395,7 +396,7 @@ class RateCalculator:
                     confidence = route.get('confidence', 0.5)
                     
                     # Look up historical data for similar route
-                    historical_rate, transcar_count, competitor_count = self.lookup_historical_data(similar_origin, similar_dest)
+                    historical_rate, transcar_count, competitor_count, transcar_records, competitor_records = self.lookup_historical_data(similar_origin, similar_dest)
                     if historical_rate is not None:
                         fallback_results.append({
                             'rate': historical_rate,
@@ -414,7 +415,7 @@ class RateCalculator:
         
         # Search for routes: Nearby Origin → Destination
         for nearby_metro in nearby_origin_metros:
-            historical_rate, transcar_count, competitor_count = self.lookup_historical_data(nearby_metro['metro'], dest_metro)
+            historical_rate, transcar_count, competitor_count, transcar_records, competitor_records = self.lookup_historical_data(nearby_metro['metro'], dest_metro)
             if historical_rate is not None:
                 fallback_results.append({
                     'rate': historical_rate,
@@ -428,7 +429,7 @@ class RateCalculator:
         
         # Search for routes: Origin → Nearby Destination
         for nearby_metro in nearby_dest_metros:
-            historical_rate, transcar_count, competitor_count = self.lookup_historical_data(origin_metro, nearby_metro['metro'])
+            historical_rate, transcar_count, competitor_count, transcar_records, competitor_records = self.lookup_historical_data(origin_metro, nearby_metro['metro'])
             if historical_rate is not None:
                 fallback_results.append({
                     'rate': historical_rate,
@@ -505,10 +506,12 @@ class RateCalculator:
         })
 
         # Step 4: Historical data lookup
-        historical_rate, transcar_count, competitor_count = self.lookup_historical_data(origin_metro, dest_metro)
+        historical_rate, transcar_count, competitor_count, transcar_records, competitor_records = self.lookup_historical_data(origin_metro, dest_metro)
         result['historical_per_mile_rate'] = historical_rate
         result['transcar_data_count'] = transcar_count
         result['competitor_data_count'] = competitor_count
+        result['transcar_records'] = transcar_records
+        result['competitor_records'] = competitor_records
 
         # Step 5: Enhanced fallback mechanism
         if historical_rate is not None:
@@ -518,6 +521,9 @@ class RateCalculator:
         else:
             # Enhanced fallback: Search for similar routes
             enhanced_rate, enhanced_transcar_count, enhanced_competitor_count, fallback_info = self.lookup_enhanced_fallback_data(origin_metro, dest_metro)
+            # Initialize empty records for enhanced fallback (we'll add this functionality later if needed)
+            result['transcar_records'] = pd.DataFrame()
+            result['competitor_records'] = pd.DataFrame()
             
             if enhanced_rate is not None:
                 result['base_rate'] = enhanced_rate * distance
@@ -539,6 +545,9 @@ class RateCalculator:
                 
                 result['base_rate'] = admin_rate * distance
                 result['per_mile_rate'] = admin_rate
+                # Initialize empty records for admin base rate
+                result['transcar_records'] = pd.DataFrame()
+                result['competitor_records'] = pd.DataFrame()
 
         # Step 6: Calculate surcharges
         origin_surcharge = 0 if origin_within else self.calculate_surcharge(origin_distance)
@@ -936,6 +945,147 @@ def main():
                             st.info("📍 Found nearby metro within 200 miles")
                 else:
                     st.warning(f"⚠️ No historical data available for this metro pair. Using Admin Base Rate of ${calculator.ADMIN_BASE_PER_MILE_RATE}/mile.")
+
+                # Display detailed records if available
+                st.subheader("📋 Detailed Records & Calculations")
+                
+                # Get the records from result
+                transcar_records = result.get('transcar_records', pd.DataFrame())
+                competitor_records = result.get('competitor_records', pd.DataFrame())
+                
+                if not transcar_records.empty or not competitor_records.empty:
+                    # Create columns for records and calculations
+                    records_col, calc_col = st.columns([3, 1])
+                    
+                    with records_col:
+                        # Create tabs for different record types
+                        if not transcar_records.empty and not competitor_records.empty:
+                            record_tab1, record_tab2 = st.tabs(["🚛 Transcar Records", "🏢 Competitor Records"])
+                            
+                            with record_tab1:
+                                st.write(f"**Found {len(transcar_records)} Transcar records:**")
+                                # Display relevant columns for Transcar data
+                                display_cols = []
+                                for col in ['Pickup City', 'Pickup State', 'Delivery City', 'Delivery State', 
+                                           'Distance', 'Total Price per Mile', 'Pickup ZIP', 'Delivery ZIP']:
+                                    if col in transcar_records.columns:
+                                        display_cols.append(col)
+                                
+                                if display_cols:
+                                    st.dataframe(transcar_records[display_cols], use_container_width=True)
+                                else:
+                                    st.dataframe(transcar_records, use_container_width=True)
+                            
+                            with record_tab2:
+                                st.write(f"**Found {len(competitor_records)} Competitor records:**")
+                                # Display relevant columns for Competitor data
+                                display_cols = []
+                                for col in ['Origin City', 'Origin State', 'Destination City', 'Dest State', 
+                                           'Distance', 'competitor price per Mile', 'Origin Zipcode', 'Dest Zipcode']:
+                                    if col in competitor_records.columns:
+                                        display_cols.append(col)
+                                
+                                if display_cols:
+                                    st.dataframe(competitor_records[display_cols], use_container_width=True)
+                                else:
+                                    st.dataframe(competitor_records, use_container_width=True)
+                        
+                        elif not transcar_records.empty:
+                            st.write(f"**Found {len(transcar_records)} Transcar records:**")
+                            # Display relevant columns for Transcar data
+                            display_cols = []
+                            for col in ['Pickup City', 'Pickup State', 'Delivery City', 'Delivery State', 
+                                       'Distance', 'Total Price per Mile', 'Pickup ZIP', 'Delivery ZIP']:
+                                if col in transcar_records.columns:
+                                    display_cols.append(col)
+                            
+                            if display_cols:
+                                st.dataframe(transcar_records[display_cols], use_container_width=True)
+                            else:
+                                st.dataframe(transcar_records, use_container_width=True)
+                        
+                        elif not competitor_records.empty:
+                            st.write(f"**Found {len(competitor_records)} Competitor records:**")
+                            # Display relevant columns for Competitor data
+                            display_cols = []
+                            for col in ['Origin City', 'Origin State', 'Destination City', 'Dest State', 
+                                       'Distance', 'competitor price per Mile', 'Origin Zipcode', 'Dest Zipcode']:
+                                if col in competitor_records.columns:
+                                    display_cols.append(col)
+                            
+                            if display_cols:
+                                st.dataframe(competitor_records[display_cols], use_container_width=True)
+                            else:
+                                st.dataframe(competitor_records, use_container_width=True)
+                    
+                    with calc_col:
+                        st.write("**💰 Rate Calculation**")
+                        
+                        # Calculate averages from the actual records
+                        transcar_rates = []
+                        competitor_rates = []
+                        
+                        if not transcar_records.empty and 'Total Price per Mile' in transcar_records.columns:
+                            transcar_rates = transcar_records['Total Price per Mile'].dropna().tolist()
+                        
+                        if not competitor_records.empty and 'competitor price per Mile' in competitor_records.columns:
+                            competitor_rates = competitor_records['competitor price per Mile'].dropna().tolist()
+                        
+                        # Display calculation breakdown
+                        if transcar_rates and competitor_rates:
+                            transcar_avg = np.mean(transcar_rates)
+                            competitor_avg = np.mean(competitor_rates)
+                            weighted_rate = (calculator.TRANSCAR_WEIGHT * transcar_avg) + (calculator.COMPETITOR_WEIGHT * competitor_avg)
+                            
+                            st.markdown(f"""
+                            **📊 Transcar Average:**  
+                            `{' + '.join([f'{rate:.3f}' for rate in transcar_rates])} ÷ {len(transcar_rates)} = ${transcar_avg:.3f}`
+                            
+                            **🏢 Competitor Average:**  
+                            `{' + '.join([f'{rate:.3f}' for rate in competitor_rates])} ÷ {len(competitor_rates)} = ${competitor_avg:.3f}`
+                            
+                            **⚖️ Weighted Calculation:**  
+                            `(70% × ${transcar_avg:.3f}) + (30% × ${competitor_avg:.3f})`  
+                            `= ${calculator.TRANSCAR_WEIGHT * transcar_avg:.3f} + ${calculator.COMPETITOR_WEIGHT * competitor_avg:.3f}`  
+                            `= **${weighted_rate:.3f}** per mile`
+                            """)
+                            
+                        elif transcar_rates:
+                            transcar_avg = np.mean(transcar_rates)
+                            st.markdown(f"""
+                            **📊 Transcar Average:**  
+                            `{' + '.join([f'{rate:.3f}' for rate in transcar_rates])} ÷ {len(transcar_rates)} = ${transcar_avg:.3f}`
+                            
+                            **✅ Final Rate:**  
+                            `100% × ${transcar_avg:.3f} = **${transcar_avg:.3f}** per mile`  
+                            *(Only Transcar data available)*
+                            """)
+                            
+                        elif competitor_rates:
+                            competitor_avg = np.mean(competitor_rates)
+                            st.markdown(f"""
+                            **🏢 Competitor Average:**  
+                            `{' + '.join([f'{rate:.3f}' for rate in competitor_rates])} ÷ {len(competitor_rates)} = ${competitor_avg:.3f}`
+                            
+                            **✅ Final Rate:**  
+                            `100% × ${competitor_avg:.3f} = **${competitor_avg:.3f}** per mile`  
+                            *(Only Competitor data available)*
+                            """)
+                        
+                        # Show final calculation
+                        if result.get('historical_per_mile_rate'):
+                            final_rate = result['historical_per_mile_rate']
+                            distance = result['distance']
+                            base_rate = final_rate * distance
+                            
+                            st.markdown(f"""
+                            ---
+                            **🎯 Base Rate Calculation:**  
+                            `${final_rate:.3f} × {distance:.1f} miles`  
+                            `= **${base_rate:.2f}**`
+                            """)
+                else:
+                    st.info("ℹ️ No detailed records available for this route.")
 
             with tab4:
                 # Detailed calculation information
